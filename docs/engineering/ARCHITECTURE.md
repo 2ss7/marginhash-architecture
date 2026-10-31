@@ -1,45 +1,45 @@
-# Runtime architecture
+# Архитектура приложения
 
-This is a code-level map of MarginHash as inspected on 1 November 2026. The private codebase contains deployment configuration, but the state of the current production server and its installed commit were not verified for this document.
+Это схема локального кода MarginHash, изученного 1 ноября 2026 года. В закрытой кодовой базе есть конфигурация deploy, но состояние сервера production и установленный на нём commit для этого документа не проверялись.
 
-## Process boundary
+## Граница процессов
 
-The web entrypoint is wsgi.py, which imports the Flask application from catalog.py. A separate scheduler.py drives source collection, merge, price-history writes and read-model refresh. The private codebase's web and scheduler unit files set distinct process roles and disable startup background jobs in the web process. The parser-group unit is present as configuration; this does not establish which units are enabled on a server.
+Точка входа веб-приложения — wsgi.py; она импортирует Flask-приложение из catalog.py. Отдельный scheduler.py запускает сбор данных, объединение предложений, запись истории цен и обновление read model. Unit-файлы веб-процесса и планировщика в закрытой кодовой базе задают разные роли и отключают фоновые задачи при старте веб-процесса. Есть и конфигурация parser-group unit, но наличие файла не означает, что этот unit включён на сервере.
 
-Manual web commands are written as deduplicated JSON files through runtime_boundary.py. The scheduler can consume those files without importing Flask route code. This keeps ordinary requests from directly running a scrape. The boundary is deliberately simple and file-based; it is not a distributed task queue.
+Ручные команды из веб-интерфейса записываются как JSON-файлы с устранением дублей через runtime_boundary.py. Планировщик может читать их без импорта кода Flask-маршрутов. Поэтому обычный HTTP-запрос не запускает сбор данных напрямую. Эта граница построена на файлах, а не на распределённой очереди задач.
 
-The web-facing path normally reads prepared files:
+Основной путь данных для веб-приложения:
 
 ~~~text
-source adapters → per-source caches → normalization → ASIC store
-                                           ↓
-                                  read-model builder
-                                           ↓
-                         API, catalog and landing snapshots
-                                           ↓
-                              Flask routes → browser
+адаптеры → cache источников → нормализация → хранилище ASIC
+                                      ↓
+                              сборка read model
+                                      ↓
+                       snapshots API, каталога и главной
+                                      ↓
+                              Flask → браузер
 ~~~
 
-The builder publishes the API snapshot with an atomic file replacement (read_model_builder.py, runtime_boundary.py). The catalog syncs a newer snapshot into bounded process-local caches (catalog.py). Some routes still have legacy merged-JSON fallbacks, and an import of catalog.py can start local background jobs unless the disabling environment flag is set. The process boundary is therefore an implemented design with compatibility paths, not a claim that every request is a pure snapshot lookup.
+Сборщик публикует API snapshot атомарной заменой файла. Каталог переносит новую версию snapshot в cache процесса с ограниченным размером. У части маршрутов ещё есть legacy fallback к объединённому JSON. Кроме того, импорт catalog.py может запустить локальные фоновые задачи, если не задан отключающий флаг окружения. Разделение процессов реализовано, но не каждый путь чтения ограничен только snapshots.
 
-## Storage choices
+## Хранение данных
 
-- asics_store.py uses SQLite tables for algorithms, normalized models and seller offers. Frequently queried fields are columns; less frequently used specifications are stored as JSON. The merger writes the store, while some readers retain JSON fallback.
-- prices_history_store.py uses SQLite WAL for price positions and change/hold points. The JSON history is retained for explicit legacy import. Local migration checks exist, but production migration is unverified.
-- runtime_boundary.py places source caches, rates and read-model snapshots in separate runtime directories. Snapshots carry timestamps or build versions so web processes can detect changes.
+- asics_store.py хранит алгоритмы, нормализованные модели и предложения продавцов в таблицах SQLite. Часто используемые поля вынесены в колонки; менее востребованные характеристики сохраняются как JSON. Объединение записывает данные в это хранилище, а часть читателей сохраняет JSON fallback.
+- prices_history_store.py использует SQLite WAL для позиций и точек изменения или удержания цены. Старый JSON остаётся источником для явного legacy-импорта. Локальные проверки миграции есть, но миграция production не подтверждена.
+- runtime_boundary.py раскладывает cache источников, ставки и snapshots read model по отдельным runtime-директориям. В snapshots есть время или версия сборки, чтобы веб-процессы обнаруживали обновления.
 
-SQLite and JSON are used for different purposes. The current system has neither a single all-SQLite data plane nor a network database.
+SQLite и JSON решают разные задачи. Система пока не сводит всё хранение к SQLite и не использует сетевую базу данных.
 
-## HTTP and frontend
+## HTTP и frontend
 
-catalog.py serves pages and API routes. The public catalog payload endpoint returns a weak ETag and cache headers, allowing a browser to receive 304 when the version has not changed (catalog.py). Routes such as raw data and search suggestions check internal access (catalog.py). The history API builds cached payloads by period and source revision (catalog.py).
+catalog.py обслуживает страницы и API-маршруты. Публичный endpoint данных каталога возвращает weak ETag и HTTP cache headers: если версия не изменилась, браузер может получить ответ 304. Маршруты сырых данных и подсказок поиска проверяют внутренний доступ. API истории кэширует ответы по периоду и ревизии источника.
 
-HTML is assembled on the server, with page-specific code in landing.py, detail_page.py and public_assets/. The catalog inserts an initial subset of grouped data and preloads the full payload, then vanilla JavaScript handles filters, sorting and search (catalog.py). Catalog SSR cards are currently disabled because server and client recalculation had disagreed; the page uses a skeleton followed by the client render. The model page loads its history chart when the chart area enters view (detail-page-runtime.js).
+HTML формируется на сервере; код отдельных страниц находится в landing.py, detail_page.py и public_assets/. Каталог вставляет начальный фрагмент сгруппированных данных и заранее загружает полный payload. Поиск, фильтрация и сортировка выполняются на vanilla JavaScript. Серверная отрисовка карточек каталога сейчас отключена из-за расхождения между серверным и клиентским пересчётом: сначала показывается skeleton, затем карточки рисует клиент. Страница модели загружает график истории, когда область графика появляется в поле зрения.
 
-## Performance and failure behavior
+## Производительность и обработка сбоев
 
-Prepared read models, bounded in-memory payload caches, ETag responses and lazy chart loading are concrete latency-oriented choices in the code. The Nginx configuration includes static-file handling and HTTP cache directives. No repeatable benchmark or verified production load figure is included here, so this document does not call the system high-load or fault-tolerant.
+Подготовленные read models, cache с ограниченным размером, ответы с ETag и отложенная загрузка графика уменьшают работу в запросах. Конфигурация Nginx содержит обработку статических файлов и HTTP cache directives. В документации нет воспроизводимого benchmark или подтверждённой цифры нагрузки production, поэтому здесь нет утверждений о высокой нагрузке или отказоустойчивости.
 
-There are known limits. A parser timeout does not terminate its worker thread. Some adapters can return stale source cache without a distinct failure status. One source-cache writer is not atomic. A long merge and a single local task queue can become bottlenecks. These are reasons to measure and harden the next iteration, not properties to hide in a portfolio.
+Известные ограничения: timeout парсера не завершает его рабочий поток; некоторые адаптеры могут вернуть старый cache без отдельного статуса ошибки; один из writer cache не пишет атомарно; длительное объединение и одна локальная очередь задач могут стать узкими местами. Эти свойства требуют измерений и доработки.
 
-The private codebase has targeted unittest cases for calculations, offer identity, source fallback, snapshots, history and release staging. No CI workflow was found in that checkout at review time. The staged WinSCP/deploy path is implemented locally but has not been validated end to end against a confirmed production base commit.
+В закрытой кодовой базе есть целевые unittest для расчётов, идентичности предложений, fallback источников, snapshots, истории и поэтапного deploy. На момент проверки CI workflow в том checkout не было. Локальная реализация поэтапного deploy через WinSCP не прошла сквозную проверку относительно подтверждённого базового commit production.
