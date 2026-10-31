@@ -1,10 +1,10 @@
-# Data collection and normalization
+# Сбор и нормализация данных
 
-This document describes the local code inspected on 1 November 2026. It explains how offers move from seller pages to the catalog read model. It does not measure the current availability of external sources.
+Документ описывает локальный код, изученный 1 ноября 2026 года: путь предложения от сайта продавца до read model каталога. Он не подтверждает текущую доступность внешних источников.
 
-## Adapter contract
+## Контракт адаптера
 
-parser_runtime.py registers 20 adapters in three groups: fast/stable, slower sources, and detail/image-heavy sources. The registry is the source of truth for configured integrations. Each adapter is responsible for its source's format and returns seller-level offers through a common shape assembled by finalize_item:
+parser_runtime.py регистрирует 20 адаптеров в трёх группах: быстрые и стабильные источники, более медленные источники, источники с детальным обходом страниц или изображений. Это число настроенных интеграций. Каждый адаптер разбирает формат своего сайта и через finalize_item формирует предложение продавца с общими полями:
 
 ~~~text
 name, hashrate, hashrate_unit, price_rub, power_watts,
@@ -12,39 +12,41 @@ algorithm, direct_url, image_url, status, status_text,
 _source, date, specs
 ~~~
 
-Each row carries a seller URL. A variant-specific URL is validated where the source exposes a variant selector, as in PushMiner; the common adapter contract alone does not prove that every seller link identifies a unique variant. Unknown values can stay empty; downstream code should not invent a price or treat unknown profitability as zero.
+У каждой записи есть ссылка на продавца. Если источник предоставляет селектор варианта, ссылка дополнительно проверяется на соответствие выбранному предложению, как у PushMiner. Общий контракт сам по себе не гарантирует, что на каждом сайте ссылка уникальна для варианта. Неизвестные значения могут оставаться пустыми: последующие этапы не должны выдумывать цену или подменять неизвестную доходность нулём.
 
-The extraction strategy depends on the seller. MiningMoon reads WooCommerce Store API data. MineStream handles AJAX fragments and has an HTML fallback. Geometria can use Playwright after a direct-request failure. PushMiner parses catalog cards and then reads Product/Offer JSON-LD for a selected variant. This is a set of source-specific adapters, not one universal scraper.
+Способы извлечения зависят от сайта. MiningMoon читает WooCommerce Store API. MineStream обрабатывает AJAX-фрагменты и при необходимости HTML. Geometria может перейти на Playwright после неудачного прямого запроса. PushMiner разбирает карточки каталога и Product/Offer JSON-LD для выбранного варианта. Единого универсального парсера для всех источников нет.
 
-## Scheduling and source failures
+## Расписание и ошибки источников
 
-scheduler.py runs groups with a configurable maximum number of active groups. Sources inside a group run sequentially, with an inter-source delay; the group path uses a thread pool when more than one group is active. The value of parsers.worker_group_workers controls group concurrency and has a legacy fallback in parser_runtime.py. It is separate from the per-source detail concurrency cap.
+scheduler.py запускает группы с настраиваемым ограничением числа одновременно активных групп. Внутри группы источники идут последовательно с паузой между ними. Если активны несколько групп, используется пул потоков. Параметр parsers.worker_group_workers управляет параллелизмом групп и имеет legacy fallback в parser_runtime.py. Ограничение параллельной загрузки деталей одного источника задаётся отдельно.
 
-The shared rate limiter spaces requests by source and request mode with jitter. Per-source state records outcomes, failure streak and the next allowed retry. A failed source can therefore back off without forcing every other adapter to stop. This is failure management in the scheduler, not process-level isolation: its timeout stops waiting for a daemon thread but cannot kill that thread (scheduler.py).
+Общий rate limiter разносит запросы по времени для каждого источника и режима, добавляя jitter. Состояние источника хранит результат последнего запуска, серию ошибок и время следующей допустимой попытки. Один сбойный источник может ждать повторной попытки, пока остальные продолжают работу. Это управление ошибками в планировщике, а не изоляция процессов: timeout прекращает ожидание daemon-потока, но не завершает сам поток.
 
-Adapters persist source-specific JSON caches. A scheduled merge reads those caches after the groups finish (scheduler.py). Some adapters explicitly signal that a result came from stale cache; the general fallback helper does not do so for every source. The common cache writer also writes directly to a file, unlike the later atomic snapshot writer. These are known limits of the current freshness and crash-safety model.
+Адаптеры сохраняют отдельные JSON cache. После завершения групп планировщик читает их для объединения. Некоторые адаптеры явно сообщают, что вернули устаревший cache, но общий fallback-путь делает это не для каждого источника. Общий writer cache пишет непосредственно в файл, в отличие от атомарной публикации последующих snapshots. Это ограничения текущей модели актуальности и устойчивости записи.
 
-## From offers to comparable models
+## От предложений к сопоставимым моделям
 
-data_merger.py performs a separate normalization pass:
+data_merger.py выполняет отдельный этап нормализации:
 
-1. Build a shared specification index from source records in configured priority order. Missing fields may be filled from compatible records.
-2. Clean names, convert currency and hashrate units, reject category headings and unusable prices.
-3. Keep seller, URL, status and specifications on each normalized offer.
-4. Remove cache/parser duplicates with the same source, normalized name and price. This is a bounded duplicate rule, not a claim that every semantically duplicate listing is found.
+1. Строит общий индекс характеристик из записей источников в заданном порядке приоритета. Недостающие поля могут заполняться из совместимых записей.
+2. Очищает названия, переводит валюты и единицы хешрейта, исключает заголовки категорий и непригодные цены.
+3. Сохраняет продавца, ссылку, статус и характеристики каждого нормализованного предложения.
+4. Удаляет дубли из cache и парсеров при совпадении источника, нормализованного названия и цены. Это ограниченное правило, а не гарантия нахождения всех смысловых дублей.
 
-The shared specification index uses guarded fuzzy matching. At least one alphanumeric model identifier must match exactly, so S21 and S21e are different. Air, hydro and immersion words prevent cross-variant matches. A secondary specification source can fill gaps, but the source name is kept when a loose reference match would rename the product incorrectly (data_merger.py).
+В общем индексе характеристик применяется нечёткое сопоставление с защитными условиями. Хотя бы один буквенно-цифровой идентификатор модели должен совпасть точно: S21 и S21e различаются. Слова air, hydro и immersion не дают смешивать варианты охлаждения. Дополнительный источник характеристик может заполнить пробелы, но исходное название продавца сохраняется, если нестрогое совпадение иначе переименовало бы товар ошибочно.
 
-The read-model builder then removes non-miners and exact duplicate offers, keeps different hashrate/URL variants, and marks values filled from peers or estimated power. Price outliers above 3× or below one third of a model median are quarantined only when at least four comparable priced offers exist (read_model_builder.py). The listing remains available without its suspect purchase price.
+Сборщик read model затем удаляет записи не о майнерах и точные дубли, сохраняет варианты с разным хешрейтом или URL, помечает характеристики, взятые из других предложений, и оценочную мощность. Цена выше тройной или ниже одной трети медианы модели исключается из расчёта цены только при наличии не менее четырёх сопоставимых предложений с ценой. Сама запись остаётся доступной без подозрительной цены покупки.
 
-The grouping layer separates clear specification variants. It accepts a replacement for a grossly inconsistent representative only when compatible priced offers are confirmed by at least two independent sellers. The resulting model card retains a representative offer identity, allowing its displayed price and economic metrics to refer to the same variant.
+Группировка разделяет явно разные варианты характеристик. Сильно противоречивые характеристики основного предложения заменяются только если совместимые предложения с ценой подтверждены как минимум двумя независимыми продавцами. Карточка модели сохраняет идентичность выбранного предложения, поэтому показанные цена и расчётные показатели относятся к одному варианту.
 
-## A concrete source-change example
+## Пример изменения источника
 
-PushMiner's newer catalog has multiple offer variants under a model URL. Its parser follows only the next sequential page of the same catalog (source/pushminer.py), validates that a card's model and purchase links contain the same offer selector, and preserves that direct link (source/pushminer.py). Detail enrichment accepts exactly one Product/Offer pair whose two JSON-LD URLs match the chosen offer (source/pushminer.py). An out-of-stock offer has no purchase price even when JSON-LD includes a numeric price. Generic seller images are excluded instead of being presented as photos of a specific ASIC variant. The focused regression tests are in test_pushminer_new_catalog.py and test_pushminer_new_detail.py.
+В новом каталоге PushMiner под одним URL модели встречаются несколько вариантов предложения. Парсер переходит только на следующую последовательную страницу того же каталога, проверяет, что ссылки на модель и покупку содержат один и тот же селектор предложения, и сохраняет прямую ссылку. При обогащении деталей принимается ровно одна пара Product/Offer, если оба URL в JSON-LD соответствуют выбранному предложению.
 
-## Output and boundaries
+Для предложения без наличия цена покупки не публикуется, даже если JSON-LD содержит число. Общие изображения продавца не показываются как фотография конкретного варианта ASIC. Эти случаи проверяют test_pushminer_new_catalog.py и test_pushminer_new_detail.py.
 
-The merge writes ASIC rows to asics_store.py; the current read path also retains a legacy JSON fallback (read_model_builder.py). read_model_builder.py calculates prepared values and publishes snapshots. Flask normally reads those snapshots rather than running the parsers during a public request.
+## Выходные данные и границы достоверности
 
-Configured adapters, successful local parser tests and source caches do not prove that all sellers are live or that production data is fresh. Source-specific fallback and the date attached to an offer need to be evaluated separately before making freshness claims.
+После объединения ASIC-записи сохраняются через asics_store.py. Для части чтения остаётся legacy JSON fallback. read_model_builder.py рассчитывает подготовленные показатели и публикует snapshots. Во время обычного публичного запроса Flask читает эти данные и не запускает парсеры.
+
+Количество адаптеров, успешные локальные тесты и наличие cache не доказывают, что все продавцы сейчас доступны или что данные production свежие. Для вывода об актуальности нужно отдельно оценивать fallback каждого источника и дату конкретного предложения.
