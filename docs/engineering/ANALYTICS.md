@@ -1,12 +1,12 @@
-# Calculation and historical data
+# Расчёты и история цен
 
-MarginHash computes scenario metrics from seller offers and external network inputs. The numbers are estimates under explicit assumptions. This document describes the local implementation, not a verified production data feed.
+MarginHash рассчитывает сценарные показатели на основе предложений продавцов и внешних сетевых данных. Результаты являются оценками при заданных допущениях. Здесь описана локальная реализация, а не проверенный поток данных production.
 
-## From network inputs to daily net revenue
+## От сетевых данных к дневной чистой выручке
 
-refresh_rates reads WhatToMine network data and a USD/RUB rate. For each supported coin, it derives an expected RUB/day value for one hashrate unit from network hashrate, block interval, block reward and exchange rate. Missing or failed inputs can use previously stored or default rates. A fallback rate is an assumption, not a fresh observation.
+refresh_rates получает сетевые данные WhatToMine и курс USD/RUB. Для поддерживаемой монеты из хешрейта сети, времени блока, награды за блок и курса выводится ожидаемая сумма в рублях за день на единицу хешрейта. При отсутствующих или недоступных входных данных может использоваться ранее сохранённая ставка либо значение по умолчанию. Такая ставка является допущением, а не свежим наблюдением.
 
-simulate_single then uses the ASIC's algorithm, hashrate, power and the calculation settings:
+simulate_single использует алгоритм ASIC, хешрейт, мощность и настройки расчёта:
 
 ~~~text
 gross = rate_RUB_per_unit_day × hashrate
@@ -14,29 +14,29 @@ net_day = gross × (1 - pool_fee_pct / 100) × (1 - p2p_fee_pct / 100)
           - (power_watts / 1000) × 24 × electricity_RUB_per_kWh
 ~~~
 
-The read-model rebuild calculates a fast daily figure for each cleaned offer (read_model_builder.py). The full path accumulates day-by-day base, optimistic and pessimistic scenarios until the fixed halving date in the current code. Optimistic and pessimistic revenue multipliers are 1.20 and 0.80. Electricity can rise annually on 1 July. Scenario ROI is cumulative net divided by the offer price; payback is the first day cumulative net meets that price. These calculations do not model every future change in network difficulty, coin price, fees or availability.
+При перестройке read model для каждого очищенного предложения быстро рассчитывается дневной показатель. Полный сценарий суммирует дневные результаты до фиксированной в текущем коде даты халвинга. Базовый, оптимистичный и пессимистичный сценарии используют множители выручки 1,00, 1,20 и 0,80. Тариф на электричество может повышаться ежегодно 1 июля. Сценарный ROI — отношение накопленной чистой выручки к цене предложения; окупаемость наступает в первый день, когда накопленная сумма достигает этой цены. Расчёт не моделирует все будущие изменения сложности сети, цены монеты, комиссий и доступности оборудования.
 
-The published snapshot stores the calculation settings alongside the derived figures. Web code rebases offer economics when a user changes a tariff or fee so the same saved basis is used across catalog, detail and comparison. If a raw fallback has no known profitability basis, the result stays unknown instead of being rendered as a real zero (catalog.py, catalog.py).
+Опубликованный snapshot сохраняет настройки вместе с рассчитанными показателями. При изменении тарифа или комиссии в интерфейсе показатели предложения пересчитываются от одной сохранённой базы для каталога, страницы модели и сравнения. Если для fallback-записи исходная база доходности неизвестна, результат остаётся неизвестным и не показывается как действительный ноль.
 
-## Offer-level and market-level aggregates
+## Агрегация предложений и рынка
 
-The grouped read model calculates separate model-level aggregates from comparable offers: total offer count, priced seller count, minimum and arithmetic mean of eligible priced offers, best net and best ROI. Those maxima need not come from the minimum-price offer. The rendered catalog card chooses an offer and uses that offer for its displayed price, net and ROI (catalog.py). Price outliers can remain in the offer list while being excluded from the purchase-price calculation.
+Сгруппированная read model рассчитывает для сопоставимых предложений модели отдельные показатели: общее число предложений, число продавцов с ценой, минимум и среднее арифметическое допустимых цен, лучшую чистую выручку и лучший ROI. Максимумы могут относиться не к самому дешёвому предложению. Карточка каталога выбирает конкретное предложение и берёт его цену, чистую выручку и ROI из одной записи. Ценовой выброс может оставаться в списке, хотя его цена исключена из расчётов покупки.
 
-The supplier analytics works over observed offers. It calculates each priced offer's percentage deviation from its model's **arithmetic mean**, then averages those deviations per supplier. It also calculates hidden-price share and summary ROI/payback statistics under the current settings. These are statistics of the sources MarginHash observes, not estimates of every seller in the market. In particular, the implemented deviation metric is not a deviation from a model's median, and the code does not calculate market share.
+Аналитика продавцов строится по наблюдаемым предложениям. Для каждого предложения с ценой вычисляется процентное отклонение от **среднего арифметического** цены его модели; затем отклонения усредняются по продавцу. Также рассчитываются доля предложений без открытой цены и сводные показатели ROI и окупаемости при текущих настройках. Это статистика источников, наблюдаемых MarginHash, а не оценка всех продавцов рынка. Отклонение от медианы модели и рыночная доля продавца пока не рассчитываются.
 
-## Price history
+## История цен
 
-The scheduler records priced merged offers through save_price_history. A stable history ID associates a position with source, model, algorithm, hashrate, power and link. prices_history_store.py stores positions and points in SQLite WAL.
+Планировщик передаёт объединённые предложения с ценой в save_price_history. Устойчивый идентификатор позиции связывает историю с источником, моделью, алгоритмом, хешрейтом, мощностью и ссылкой. prices_history_store.py хранит позиции и точки наблюдений в SQLite WAL.
 
-The point writer uses two states (prices_history_store.py):
+При записи используются два типа точек:
 
-- A change point records the first observation or a changed price.
-- A hold point moves forward while the price is unchanged. The previous plateau boundary is retained when a later change arrives.
+- Точка изменения фиксирует первое наблюдение или новую цену.
+- Точка удержания сдвигается вперёд, пока цена не меняется. Когда позже возникает изменение, граница предыдущего участка постоянной цены сохраняется.
 
-Batch writes, position metadata and the history revision commit in one transaction (prices_history_store.py). The web checks that revision at most once per second per process before reusing its history cache (prices_history_store.py). The old JSON file can be imported explicitly; ordinary reads and writes do not rebuild SQLite from it.
+Пакет записей, метаданные позиций и ревизия истории фиксируются одной транзакцией. Перед повторным использованием cache веб-процесс проверяет ревизию не чаще одного раза в секунду. Старый JSON можно импортировать явно; обычное чтение и запись не пересобирают SQLite из него.
 
-The history endpoint builds period-specific payloads and caches them against the source version. Historical profitability combines prices with historical rates when available, but avoids carrying a rate through a long missing interval. Long series are reduced before drawing charts. A price chart and an income scenario answer different questions and should not be read as a realized return.
+Endpoint истории строит данные для выбранного периода и кэширует их с учётом ревизии источника. Историческая доходность объединяет цены с историческими ставками, когда они доступны, но не переносит ставку через длинный промежуток без наблюдений. Длинные ряды сокращаются перед построением графика. График цены и сценарий доходности отвечают на разные вопросы; ни один из них не показывает фактически полученный доход.
 
-## Current limits
+## Текущие ограничения
 
-The SQLite price-history read/write path and migration checks have been verified locally, but the production migration and freshness of production history remain unverified. ASIC storage still has a JSON fallback. Broader ideas, including supplier market share and median-based supplier pricing, are not implemented.
+Путь чтения и записи истории через SQLite и проверки миграции подтверждены локально. Миграция production и актуальность его истории не проверены. Для хранения ASIC остаётся JSON fallback. Рыночная доля поставщиков и отклонение их цен от медианы модели пока существуют только как идеи.
